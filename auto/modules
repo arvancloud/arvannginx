@@ -101,7 +101,6 @@ if [ $HTTP = YES ]; then
         HTTP_SRCS="$HTTP_SRCS $HTTP_FILE_CACHE_SRCS"
     fi
 
-
     # the module order is important
     #     ngx_http_static_module
     #     ngx_http_gzip_static_module
@@ -910,6 +909,20 @@ if [ $HTTP = YES ]; then
 
         . auto/module
     fi
+
+    if [ $HTTP_CACHE_OPTIMIZED != NO ]; then
+        have=NGX_HTTP_CACHE_OPTIMIZED . auto/have
+
+        ngx_module_name=
+        ngx_module_incs=
+        ngx_module_deps=
+        ngx_module_srcs=
+        ngx_module_libs=
+        ngx_module_libs=$HTTP_CACHE_OPTIMIZED
+        ngx_module_link=YES
+        . auto/module
+    fi
+
 fi
 
 

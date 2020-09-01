@@ -10,6 +10,9 @@
 #include <ngx_http.h>
 #include <ngx_md5.h>
 
+#if (NGX_HTTP_CACHE_OPTIMIZED)
+#include <optimization.h>
+#endif
 
 static ngx_int_t ngx_http_file_cache_lock(ngx_http_request_t *r,
     ngx_http_cache_t *c);
@@ -44,6 +47,10 @@ static ngx_int_t ngx_http_file_cache_reopen(ngx_http_request_t *r,
     ngx_http_cache_t *c);
 static ngx_int_t ngx_http_file_cache_update_variant(ngx_http_request_t *r,
     ngx_http_cache_t *c);
+#if (NGX_HTTP_CACHE_OPTIMIZED)
+static ngx_int_t ngx_http_file_get_optimize_act(ngx_http_request_t *r, ngx_str_t *type);
+static ngx_int_t ngx_http_file_cache_optimize(ngx_http_request_t *r, ngx_temp_file_t *tf);
+#endif
 static void ngx_http_file_cache_cleanup(void *data);
 static time_t ngx_http_file_cache_forced_expire(ngx_http_file_cache_t *cache);
 static time_t ngx_http_file_cache_expire(ngx_http_file_cache_t *cache);
@@ -1352,6 +1359,220 @@ ngx_http_file_cache_update_variant(ngx_http_request_t *r, ngx_http_cache_t *c)
 }
 
 
+#if (NGX_HTTP_CACHE_OPTIMIZED)
+static ngx_int_t
+ngx_http_file_get_optimize_act(ngx_http_request_t *r, ngx_str_t *type)
+{
+    u_char                    *act;
+    ngx_int_t                  i;
+    ngx_str_t                  act_str;
+    ngx_http_upstream_conf_t  *c;
+
+    c = r->upstream->conf;
+    if (c->cache_optimize_val == NULL) {
+        return NO_ACT;
+    }
+
+    if (ngx_http_complex_value(r, c->cache_optimize_val, &act_str) != NGX_OK) {
+        return NO_ACT;
+    }
+    ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+                   "http file cache get optimize val: %s", act_str.data);
+    for (i = NO_ACT; i < MAX_ACT; ++i) {
+        act = (u_char *) OPT_ACTION_STR[i];
+        if (ngx_strncasecmp(act_str.data, act, ngx_strlen(act)) == 0) {
+            if (act_str.len > 5 &&
+                ngx_strncasecmp(act_str.data + act_str.len - 5,
+                                (u_char *) "_webp", 5) == 0) {
+                ngx_str_set(type, "image/webp");
+            } else {
+                ngx_str_null(type);
+            }
+            return i;
+        }
+    }
+    return NO_ACT;
+}
+
+static ngx_int_t
+ngx_http_file_cache_optimize(ngx_http_request_t *r, ngx_temp_file_t *tf)
+{
+    size_t                         n, nlen;
+    u_char                        *hbuffer, *sp, *hstatus, *dbuffer;
+    OPT_ACTION                     atype;
+    ngx_err_t                      err;
+    ngx_int_t                      rc;
+    ngx_str_t                      otype;
+    ngx_file_t                     file;
+    ngx_uint_t                     i;
+    ngx_list_part_t               *part;
+    ngx_table_elt_t               *header;
+    ngx_http_cache_t              *c;
+    ngx_http_file_cache_header_t   h;
+
+    c = r->cache;
+    nlen = 0;
+    rc = NGX_ABORT;
+
+    ngx_log_debug0(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+                   "http file cache optimization");
+    atype = ngx_http_file_get_optimize_act(r, &otype);
+    if (atype == NO_ACT) {
+        return NGX_DECLINED;
+    }
+    nlen = r->upstream->headers_in.content_length_n;
+    dbuffer = ngx_pcalloc(r->pool, nlen);
+    if (dbuffer == NULL) {
+        return rc;
+    }
+
+    hbuffer = ngx_pcalloc(r->pool, c->body_start);
+    if (hbuffer == NULL) {
+      ngx_pfree(r->pool, dbuffer);
+      return rc;
+    }
+
+    n = ngx_read_file(&tf->file, (u_char *) &h,
+                      sizeof(ngx_http_file_cache_header_t), 0);
+    if (n != sizeof(ngx_http_file_cache_header_t)) {
+        goto done;
+    }
+
+    n = ngx_read_file(&tf->file, hbuffer, c->header_start,
+                      sizeof(ngx_http_file_cache_header_t));
+    if (n == 0) {
+        goto done;
+    }
+    if (ngx_read_file(&tf->file, dbuffer, nlen, c->body_start)
+        !=(ssize_t) nlen) {
+        goto done;
+    }
+    nlen = optimize_data(atype, (char *)dbuffer, nlen);
+    if(nlen == 0) {
+        goto done;
+    }
+
+    hstatus = ngx_pcalloc(r->pool, r->upstream->headers_in.status_line.len
+                          + 2);
+    if (hstatus == NULL) {
+        goto done;
+    }
+    ngx_sprintf(hstatus, "%V", &r->upstream->headers_in.status_line);
+    sp = (u_char*) ngx_strstr(hbuffer, hstatus);
+    ngx_pfree(r->pool, hstatus);
+    if (sp && sp > hbuffer) {
+        n = sp - hbuffer + r->upstream->headers_in.status_line.len + 2;
+        hbuffer[n] = '\0';
+    ngx_log_debug2(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+                   "optimization %d %s", n, hbuffer);
+    } else {
+        goto done;
+    }
+    part = &r->upstream->headers_in.headers.part;
+    header = part->elts;
+
+    for (i = 0; /* void */ ; i++) {
+
+        if (i >= part->nelts) {
+            if (part->next == NULL) {
+                break;
+            }
+
+            part = part->next;
+            header = part->elts;
+            i = 0;
+        }
+
+        if (header[i].hash == 0) {
+            continue;
+        }
+
+        if (otype.len > 0 &&
+            &header[i] == r->upstream->headers_in.content_type) {
+          sp = ngx_snprintf(&hbuffer[n], c->body_start - n, "%s: %s\n",
+                            header[i].key.data, otype.data);
+        } else if (nlen > 0 &&
+                   &header[i] == r->upstream->headers_in.content_length) {
+          sp = ngx_snprintf(&hbuffer[n], c->body_start - n, "%s: %z\n",
+                            header[i].key.data, nlen);
+        } else {
+          sp = ngx_snprintf(&hbuffer[n], c->body_start - n, "%s: %s\n",
+                            header[i].key.data, header[i].value.data);
+        }
+        if (sp > &hbuffer[n] && sp < &hbuffer[c->body_start]) {
+            n += sp - &hbuffer[n];
+        } else {
+            goto done;
+        }
+    }
+    if (n < c->body_start) {
+        hbuffer[n] = '\n';
+        n++;
+    } else {
+        goto done;
+    }
+
+    ngx_memzero(&file, sizeof(ngx_file_t));
+    file.name = c->file.name;
+    file.log = r->connection->log;
+    file.fd = ngx_open_file(file.name.data, NGX_FILE_WRONLY, 
+                            NGX_FILE_CREATE_OR_OPEN, NGX_FILE_DEFAULT_ACCESS);
+    if (file.fd == NGX_INVALID_FILE) {
+        err = ngx_errno;
+
+        if (err == NGX_ENOPATH) {
+            err = ngx_create_full_path(file.name.data, 
+                                       ngx_dir_access(NGX_FILE_OWNER_ACCESS));
+            file.fd = ngx_open_file(file.name.data, NGX_FILE_WRONLY,
+                                    NGX_FILE_CREATE_OR_OPEN,
+                                    NGX_FILE_DEFAULT_ACCESS);
+        }
+
+        if (file.fd == NGX_INVALID_FILE || err) {
+            ngx_log_error(NGX_LOG_CRIT, r->connection->log, ngx_errno,
+                          ngx_fd_info_n " \"%s\" open cache failed",
+                          file.name.data);
+            goto done;
+        }
+    }
+    
+    h.body_start = n + sizeof(ngx_http_file_cache_header_t);
+    if (ngx_write_file(&file, (u_char*)&h, 
+                       sizeof(ngx_http_file_cache_header_t), 0)
+            != sizeof(ngx_http_file_cache_header_t)) {
+        goto done;
+    }
+    if (ngx_write_file(&file, hbuffer, n,
+                       sizeof(ngx_http_file_cache_header_t)) != (ssize_t) n) {
+        goto done;
+    }
+    if (ngx_write_file(&file, dbuffer, nlen,
+                       n + sizeof(ngx_http_file_cache_header_t))
+            != (ssize_t) nlen) {
+        goto done;
+    }
+
+    if (ngx_close_file(tf->file.fd) == NGX_FILE_ERROR) {
+        ngx_log_error(NGX_LOG_ALERT, r->connection->log, ngx_errno,
+                      ngx_close_file_n " \"%s\" failed", tf->file.name.data);
+    }
+
+    if (ngx_delete_file(tf->file.name.data) == NGX_FILE_ERROR) {
+        ngx_log_error(NGX_LOG_CRIT, r->connection->log, ngx_errno,
+                      ngx_delete_file_n " \"%s\" failed",
+                      tf->file.name.data);
+    }
+    tf->file = file;
+    ngx_log_debug0(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+                   "http file cache optimization return NGX_OK");
+    rc = NGX_OK;
+done:
+    ngx_pfree(r->pool, hbuffer);
+    ngx_pfree(r->pool, dbuffer);
+    return rc;
+}
+#endif
+
 void
 ngx_http_file_cache_update(ngx_http_request_t *r, ngx_temp_file_t *tf)
 {
@@ -1391,7 +1612,14 @@ ngx_http_file_cache_update(ngx_http_request_t *r, ngx_temp_file_t *tf)
     ext.delete_file = 1;
     ext.log = r->connection->log;
 
-    rc = ngx_ext_rename_file(&tf->file.name, &c->file.name, &ext);
+#if (NGX_HTTP_CACHE_OPTIMIZED)
+    rc = ngx_http_file_cache_optimize(r,tf);
+#else
+    rc = NGX_DECLINED;
+#endif
+    if (rc == NGX_DECLINED) {
+        rc = ngx_ext_rename_file(&tf->file.name, &c->file.name, &ext);
+    }
 
     if (rc == NGX_OK) {
 

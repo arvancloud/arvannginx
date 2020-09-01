@@ -242,6 +242,10 @@ typedef struct {
 
     NGX_COMPAT_BEGIN(2)
     NGX_COMPAT_END
+
+#if (NGX_HTTP_CACHE && NGX_HTTP_CACHE_OPTIMIZED)
+    ngx_http_complex_value_t        *cache_optimize_val;
+#endif
 } ngx_http_upstream_conf_t;
 
 

@@ -731,6 +731,16 @@ static ngx_command_t  ngx_http_proxy_commands[] = {
 
 #endif
 
+#if (NGX_HTTP_CACHE && NGX_HTTP_CACHE_OPTIMIZED)
+    { ngx_string("cache_optimize"),
+      NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_TAKE1,
+      ngx_http_set_complex_value_slot,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      offsetof(ngx_http_proxy_loc_conf_t, upstream.cache_optimize_val),
+      NULL },
+
+#endif
+
       ngx_null_command
 };
 
@@ -3412,6 +3422,11 @@ ngx_http_proxy_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
 #endif
     }
 
+#if (NGX_HTTP_CACHE && NGX_HTTP_CACHE_OPTIMIZED)
+    if (conf->upstream.cache_optimize_val == NULL) {
+        conf->upstream.cache_optimize_val = prev->upstream.cache_optimize_val;
+    }
+#endif
     return NGX_CONF_OK;
 }
 

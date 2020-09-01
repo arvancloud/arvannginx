@@ -55,6 +55,7 @@ NGX_HTTP_UWSGI_TEMP_PATH=
 NGX_HTTP_SCGI_TEMP_PATH=
 
 HTTP_CACHE=YES
+HTTP_CACHE_OPTIMIZED=NO
 HTTP_CHARSET=YES
 HTTP_GZIP=YES
 HTTP_SSL=NO
@@ -214,6 +215,7 @@ $0: warning: the \"--with-ipv6\" option is deprecated"
 
         --without-http)                  HTTP=NO                    ;;
         --without-http-cache)            HTTP_CACHE=NO              ;;
+        --with-http-cache-optimized=*)     HTTP_CACHE_OPTIMIZED="$value" ;;
 
         --http-log-path=*)               NGX_HTTP_LOG_PATH="$value" ;;
         --http-client-body-temp-path=*)  NGX_HTTP_CLIENT_TEMP_PATH="$value" ;;
@@ -516,6 +518,7 @@ cat << END
 
   --without-http                     disable HTTP server
   --without-http-cache               disable HTTP cache
+  --with-http-cache-optimized=PATH   enable optimization HTTP cache files
 
   --with-mail                        enable POP3/IMAP4/SMTP proxy module
   --with-mail=dynamic                enable dynamic POP3/IMAP4/SMTP proxy module
