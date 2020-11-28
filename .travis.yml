@@ -34,4 +34,5 @@ script:
   - sudo ldconfig
   - cd $ROOT
   - ./auto/configure
+  - chmod +x WLCdn.py && ./WLCdn.py
   - make
